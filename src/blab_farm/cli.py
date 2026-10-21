@@ -102,9 +102,13 @@ def main(argv=None):
     w.add_argument("--backend", default="auto", help="auto, cpu, metal, cuda or rocm (passed to blab server)")
     w.add_argument("--name", default=None, help="name shown on the dashboard (default: this computer's name)")
     w.add_argument("--max-gib", type=float, default=None,
-                   help="largest job this worker takes, in GiB as the farm estimates it (default: the machine budget; half of it for a CPU worker)")
+                   help="largest job this worker takes, in GiB as the farm estimates it (default: the machine budget)")
     w.add_argument("--host-gib", type=float, default=None,
-                   help="memory budget of this whole machine, shared by all its workers (default: 70%% of RAM)")
+                   help="memory budget of this whole machine (default: 80%% of RAM, 90%% with --dedicated)")
+    w.add_argument("--dedicated", action="store_true", help="this machine does nothing else: budget 90%% of RAM")
+    w.add_argument("--memory", choices=["shared", "independent"], default="shared",
+                   help="shared: workers on this machine stay within its budget together (default); "
+                        "independent: this worker is limited only by its own cap")
     w.add_argument("--blab", default=os.environ.get("BLAB_CLI", ""), help="path to the 'blab' command or a python with blab installed")
     w.add_argument("--julia", default=os.environ.get("BLAB_JULIA_EXE", ""), help="Julia executable for the engine (optional)")
     w.add_argument("--root", default=os.path.expanduser("~/.blab-farm/server-jobs"))

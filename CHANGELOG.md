@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-21)
 
 - First extraction from a horn-design workflow: coordinator (`serve`), worker wrapper (`worker`) with
   macOS/Linux/Windows login-service installers, `status`, dashboard, LAN discovery and self-registration,
@@ -10,3 +10,6 @@
   twice too high); CPU workers counted at twice the memory (complex128); per-machine budget (`--host-gib`,
   `@max/host`) so two workers on one machine do not overcommit it; a worker's own registration now updates
   the caps discovery guessed; design note on pooling RAM across machines (`docs/POOLED_MEMORY.md`).
+- Workers say how they use their machine's memory: `--memory shared` (default: siblings stay within the
+  machine budget together) or `--memory independent` (own cap only); `--dedicated` for a machine that does
+  nothing else (budget 90 % of RAM, otherwise 80 %). The dashboard shows each worker's cap and budget.

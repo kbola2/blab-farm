@@ -95,15 +95,11 @@ def register_loop(farm_url, body, interval=60.0):
 def run_worker(args):
     name = args.name or computer_name()
     ram = total_ram_gib()
-    host_gib = args.host_gib if args.host_gib is not None else (round(0.7 * ram, 1) if ram else None)
-    cpu_backend = args.backend.endswith("cpu")
-    if args.max_gib is not None:
-        max_gib = args.max_gib
-    elif host_gib is not None:
-        # The farm counts a CPU (complex128) job at twice its size, so the same cap means a smaller mesh there.
-        max_gib = round(host_gib / 2, 1) if cpu_backend else host_gib
-    else:
-        max_gib = None
+    share = 0.9 if args.dedicated else 0.8  # a dedicated machine runs nothing else; otherwise leave room for the desktop
+    host_gib = args.host_gib if args.host_gib is not None else (round(share * ram, 1) if ram else None)
+    # The farm already counts a CPU (complex128) job at twice its size, so the cap itself is the same for both.
+    max_gib = args.max_gib if args.max_gib is not None else host_gib
+    memory = "independent" if args.memory == "independent" else "shared"
     url = f"http://{local_ip()}:{args.port}"
     Path(args.root).expanduser().mkdir(parents=True, exist_ok=True)
     cmd = blab_command(args.blab) + ["server", "--root", str(Path(args.root).expanduser()), "--mode", "private-network",
@@ -112,9 +108,9 @@ def run_worker(args):
         cmd += ["--julia-executable", args.julia]
     if sys.platform == "darwin" and not args.no_caffeinate and shutil.which("caffeinate"):
         cmd = ["caffeinate", "-is"] + cmd
-    print(f"worker ready: {url}  name={name}  backend={args.backend}  max_gib={max_gib}  machine={host_gib}", flush=True)
+    print(f"worker ready: {url}  name={name}  backend={args.backend}  max_gib={max_gib}  machine={host_gib} ({memory})", flush=True)
     if args.farm:
-        body = {"url": url, "name": name, "max_gib": max_gib, "host_gib": host_gib}
+        body = {"url": url, "name": name, "max_gib": max_gib, "host_gib": host_gib, "memory": memory}
         threading.Thread(target=register_loop, args=(args.farm, body), daemon=True).start()
     else:
         print("no --farm given: the coordinator will still find this worker by LAN scan on its port", flush=True)
@@ -130,6 +126,8 @@ def _worker_args(args):
     if args.name: out += ["--name", args.name]
     if args.max_gib is not None: out += ["--max-gib", str(args.max_gib)]
     if args.host_gib is not None: out += ["--host-gib", str(args.host_gib)]
+    if args.dedicated: out += ["--dedicated"]
+    if args.memory != "shared": out += ["--memory", args.memory]
     if args.blab: out += ["--blab", args.blab]
     if args.julia: out += ["--julia", args.julia]
     if args.no_caffeinate: out += ["--no-caffeinate"]

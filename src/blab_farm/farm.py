@@ -45,7 +45,7 @@ class WorkerError(RuntimeError):
 class Worker:
     """One Boundary Lab server, addressed like the GUI addresses it."""
 
-    def __init__(self, url, *, name=None, token=None, max_gib=None, host_gib=None):
+    def __init__(self, url, *, name=None, token=None, max_gib=None, host_gib=None, shared=True):
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError(f"worker needs an http(s) base URL: {url}")
@@ -66,6 +66,7 @@ class Worker:
         self.seconds_total = 0.0
         self.max_gib = max_gib  # dense-BEM memory this worker may take on (None = unlimited)
         self.host_gib = host_gib  # memory budget of the whole machine, shared by every worker on it (None = unknown)
+        self.shared = shared  # False: this worker ignores the other workers on its machine (its own cap only)
 
     def need(self, gib):
         """What a job estimated at ``gib`` (Metal/CUDA, complex64) costs on this worker: the CPU backend solves
@@ -84,7 +85,7 @@ class Worker:
         return {"name": self.name, "url": self.url, "backend_id": self.backend_id, "solved": self.solved,
                 "seconds": round(self.seconds, 2), "seconds_per_frequency": round(self.seconds / self.solved, 2) if self.solved else None,
                 "solved_total": self.solved_total + self.solved, "down": self.down, "busy": self.current is not None, "max_gib": self.max_gib,
-                "host": self.host, "host_gib": self.host_gib,
+                "host": self.host, "host_gib": self.host_gib, "memory": "shared" if self.shared else "independent",
                 "current_batch": list(self.current or []), "failures": self.failures, "last_error": self.last_error}
 
     def call(self, path, *, data=None, method="GET", timeout=30):
@@ -293,10 +294,10 @@ class Farm:
     def host_headroom(self, worker, job):
         """A worker on a machine with a known budget may start a batch only if the batches already running
         on that machine's other workers leave room for this one."""
-        if worker.host_gib is None:
+        if worker.host_gib is None or not worker.shared:
             return True
         in_use = sum(w.need(w.current_gib) for w in self.workers
-                     if w is not worker and w.host == worker.host and w.current is not None)
+                     if w is not worker and w.shared and w.host == worker.host and w.current is not None)
         return in_use == 0 or in_use + worker.need(job.gib) <= worker.host_gib  # alone on the machine: the cap decides
 
     def _priority(self, job):
@@ -359,7 +360,7 @@ class Farm:
             self.current_job = next(iter(self.active_jobs()), job)
 
     # ----- workers joining on their own
-    def add_worker(self, url, *, name=None, token=None, max_gib=None, host_gib=None, stated=False):
+    def add_worker(self, url, *, name=None, token=None, max_gib=None, host_gib=None, shared=True, stated=False):
         """Add a server if it speaks the protocol; idempotent by URL. Returns (worker, added). A worker's own
         registration (``stated``) overrides the name and caps discovery guessed for it."""
         url = url.rstrip("/")
@@ -369,11 +370,12 @@ class Farm:
                     if name and worker.name != name:  # a self-registration knows its real computer name
                         LOGGER.info("worker %s is %s", worker.name, name)
                         worker.name = name
-                    if stated and (worker.max_gib, worker.host_gib) != (max_gib, host_gib):
-                        LOGGER.info("worker %s caps: %s GiB, machine %s GiB", worker.name, max_gib, host_gib)
-                        worker.max_gib, worker.host_gib = max_gib, host_gib
+                    if stated and (worker.max_gib, worker.host_gib, worker.shared) != (max_gib, host_gib, shared):
+                        LOGGER.info("worker %s caps: %s GiB, machine %s GiB, %s", worker.name, max_gib, host_gib,
+                                    "shared" if shared else "independent")
+                        worker.max_gib, worker.host_gib, worker.shared = max_gib, host_gib, shared
                     return worker, False
-            worker = Worker(url, name=name, token=token, max_gib=max_gib, host_gib=host_gib)
+            worker = Worker(url, name=name, token=token, max_gib=max_gib, host_gib=host_gib, shared=shared)
             info = worker.capabilities()
             if info.get("protocol") != PROTOCOL:
                 raise ValueError(f"{url} is not a Boundary Lab server ({info.get('error', 'no protocol field')})")
@@ -771,7 +773,8 @@ def create_http_server(farm, *, host="0.0.0.0", port=8766, token=None):
                     body = json.loads(self.rfile.read(length))
                     worker, added = farm.add_worker(str(body["url"]), name=body.get("name") or None, token=farm.worker_token,
                                                     max_gib=body.get("max_gib", farm.discovered_max_gib),
-                                                    host_gib=body.get("host_gib"), stated=True)
+                                                    host_gib=body.get("host_gib"),
+                                                    shared=body.get("memory", "shared") != "independent", stated=True)
                     self.reply(200, {"registered": True, "added": added, "name": worker.name, "url": worker.url})
                 elif self.command == "GET" and path.path in {"/", "/dashboard"}:
                     data = (Path(__file__).with_name("dashboard.html")).read_bytes()
@@ -841,14 +844,15 @@ def local_ip():
 
 def parse_worker(spec, token):
     """URL[=name][@max_gib[/host_gib]], e.g. http://192.168.1.86:8765=mbp@48 or http://127.0.0.1:8771=air-metal@12/14
-    (this worker takes jobs up to 12 GiB; all workers on that machine together stay within 14 GiB)."""
+    (this worker takes jobs up to 12 GiB; all workers on that machine together stay within 14 GiB).
+    Without ``/host_gib`` the worker is independent: only its own cap limits it."""
     url, _, rest = spec.partition("=")
     name, _, cap = rest.partition("@")
     if "@" in url:
         url, _, cap = url.partition("@")
     cap, _, host_cap = cap.partition("/")
     return Worker(url, name=name or None, token=token, max_gib=float(cap) if cap else None,
-                  host_gib=float(host_cap) if host_cap else None)
+                  host_gib=float(host_cap) if host_cap else None, shared=bool(host_cap))
 
 
 def main(argv=None):

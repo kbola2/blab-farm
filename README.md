@@ -84,10 +84,12 @@ GUI / blab CLI --(blab-remote v2)--> blab-farm serve --(blab-remote v2)--> blab 
 
 | Option | Meaning |
 |---|---|
-| `serve --worker URL[=name][@max_gib[/host_gib]]` | pin a worker instead of discovery; `@12/14`: jobs up to 12 GiB, and all workers on that machine together stay within 14 GiB |
+| `serve --worker URL[=name][@max_gib[/host_gib]]` | pin a worker instead of discovery; `@12/14`: jobs up to 12 GiB, and all workers on that machine together stay within 14 GiB; `@12` alone: independent |
 | `serve --discovered-max-gib N` | cap for workers that join without stating their own |
-| `worker --host-gib N` | memory budget of the whole machine, shared by its workers (default 70 % of RAM) |
-| `worker --max-gib N` | largest job this worker takes (default: the machine budget; half of it for a CPU worker, which needs twice the memory per mesh) |
+| `worker --host-gib N` | memory budget of the whole machine (default 80 % of RAM; 90 % with `--dedicated`) |
+| `worker --dedicated` | this machine does nothing else (no desktop, no GUI): budget 90 % of RAM |
+| `worker --memory shared\|independent` | `shared` (default): the workers on this machine stay within its budget together; `independent`: this worker is limited only by its own cap, even if a sibling is busy |
+| `worker --max-gib N` | largest job this worker takes (default: the machine budget; the farm already counts a CPU worker's jobs at twice their size) |
 | `worker --backend metal|cpu|cuda|rocm|auto` | passed to `blab server` |
 | `worker --blab PATH` | the `blab` command or a python with Boundary Lab installed, if not on PATH |
 | `worker --port N` | one worker per port; run a GPU worker and a CPU worker on the same machine on two ports, each with its own service; the machine budget keeps them from overcommitting the RAM together |

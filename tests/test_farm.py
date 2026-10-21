@@ -323,16 +323,33 @@ def test_workers_on_one_machine_share_its_memory_budget(farm):
                 assert not overlap, "both workers of one machine ran batches at the same time"
 
 
+def test_independent_workers_ignore_the_machine_budget(farm):
+    a, b = FakeWorker("a"), FakeWorker("b")
+    url, live = farm([a, b], batch_size=1)
+    _, reply = call(url, "/v1/jobs", data=bundle([100.0]), method="POST")
+    drain(url, reply["job_id"])
+    job = live.jobs[reply["job_id"]]
+    first, second = live.workers
+    first.host_gib = second.host_gib = 1.5
+    first.current, first.current_gib = [0], job.gib     # "a" is busy with a job that fills most of the machine
+    second.shared = first.shared = True
+    assert live.host_headroom(second, job) is False, "shared: the busy sibling leaves no room"
+    second.shared = False
+    assert live.host_headroom(second, job) is True, "independent: only its own cap counts"
+    assert blab_farm.parse_worker("http://h:1=x@12", None).shared is False
+    assert blab_farm.parse_worker("http://h:1=x@12/14", None).shared is True
+
+
 def test_registration_updates_caps_discovery_guessed(farm):
     w = FakeWorker("guess")
     url, live = farm([w])
     live.discovered_max_gib = 48.0
     live.workers[0].max_gib = 48.0
-    body = json.dumps({"url": w.url, "name": "real name", "max_gib": 5.0, "host_gib": 11.0}).encode()
+    body = json.dumps({"url": w.url, "name": "real name", "max_gib": 5.0, "host_gib": 11.0, "memory": "independent"}).encode()
     request = Request(url + "/v1/farm/register", data=body, method="POST", headers={"Content-Type": "application/json"})
     with urlopen(request, timeout=5) as response:
         assert json.loads(response.read())["name"] == "real name"
-    assert (live.workers[0].max_gib, live.workers[0].host_gib) == (5.0, 11.0)
+    assert (live.workers[0].max_gib, live.workers[0].host_gib, live.workers[0].shared) == (5.0, 11.0, False)
 
 
 def test_idle_fast_worker_duplicates_a_straggler_batch(farm):

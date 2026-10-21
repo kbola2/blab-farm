@@ -76,7 +76,7 @@ function strip(job,el){
 }
 function legend(workers,job){
   const range=w=>{const b=w.current_batch; if(!b.length||!job) return "solving"; const f=job.frequencies_hz; return `solving ${fmtF(f[b[0]])} – ${fmtF(f[b[b.length-1]])}`;};
-  document.getElementById("legend").innerHTML=workers.map(w=>`<div class="chip"><i style="background:${col(w.name)}"></i><b>${w.name}</b><span>${w.backend_id?w.backend_id.replace("beat_",""):"–"}</span><span>${w.solved} solved</span><span>${w.seconds_per_frequency!=null?w.seconds_per_frequency.toFixed(1)+" s/freq":""}</span><span class="st ${w.down?'down':(w.busy?'busy':'')}">${w.down?"down":(w.busy?range(w):"idle")}</span></div>`).join("");
+  document.getElementById("legend").innerHTML=workers.map(w=>`<div class="chip"><i style="background:${col(w.name)}"></i><b>${w.name}</b><span>${w.backend_id?w.backend_id.replace("beat_",""):"–"}</span><span>${w.max_gib!=null?w.max_gib+" GiB"+(w.host_gib!=null&&w.memory==="shared"?" of "+w.host_gib+" shared":""):""}</span><span>${w.solved} solved</span><span>${w.seconds_per_frequency!=null?w.seconds_per_frequency.toFixed(1)+" s/freq":""}</span><span class="st ${w.down?'down':(w.busy?'busy':'')}">${w.down?"down":(w.busy?range(w):"idle")}</span></div>`).join("");
 }
 function lanes(job,workers){
   const el=document.getElementById("lanes"); if(!job){el.innerHTML="";return;}
