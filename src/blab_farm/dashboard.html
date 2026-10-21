@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Boundary Lab farm</title>
+<style>
+:root{color-scheme:dark;--surface:#1a1a19;--panel:#222221;--line:#34342f;--text:#f0efec;--muted:#c3c2b7;--dim:#7c7b74;
+ --s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#9085e9;--good:#0ca30c;--critical:#d03b3b;--warning:#fab219}
+*{box-sizing:border-box}body{margin:0;background:var(--surface);color:var(--text);font:14px/1.45 -apple-system,"Helvetica Neue",Inter,sans-serif;padding:0 16px 32px}
+header{display:flex;align-items:baseline;gap:16px;padding:18px 0 8px;border-bottom:1px solid var(--line)}
+h1{font-size:18px;margin:0;font-weight:600;letter-spacing:.2px}h1 small{color:var(--muted);font-weight:400;margin-left:8px}
+.state{margin-left:auto;color:var(--muted);font-variant-numeric:tabular-nums}
+.hero{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:16px 0}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.tile .k{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.6px}.tile .v{font-size:28px;font-weight:600;font-variant-numeric:tabular-nums;margin-top:2px}
+.tile .v small{font-size:13px;color:var(--muted);font-weight:400;margin-left:4px}
+section{margin:18px 0}h2{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin:0 0 8px;font-weight:600}
+svg{display:block;width:100%;overflow:visible}
+.legend{display:flex;flex-wrap:wrap;gap:8px 18px;margin:10px 0 0}.chip{display:flex;align-items:center;gap:8px;color:var(--muted);font-variant-numeric:tabular-nums}
+.chip i{width:12px;height:12px;border-radius:3px;display:inline-block}.chip b{color:var(--text);font-weight:600}
+.chip .st{font-size:12px;padding:1px 7px;border-radius:999px;border:1px solid var(--line)}
+.chip .st.busy{border-color:var(--good);color:#9fe29f}.chip .st.down{border-color:var(--critical);color:#f0a2a2}
+.lanes .row{display:grid;grid-template-columns:120px 1fr;align-items:center;gap:10px;margin:6px 0}.lanes .row .n{color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+#tip{position:fixed;pointer-events:none;background:#0e0e0d;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;color:var(--text);display:none;z-index:9;box-shadow:0 6px 24px #0008}
+#tip .m{color:var(--muted)}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}td,th{padding:4px 8px;border-bottom:1px solid var(--line);text-align:right}th{color:var(--muted);font-weight:500;text-transform:uppercase;font-size:11px;letter-spacing:.5px}td:first-child,th:first-child{text-align:left}
+details summary{color:var(--muted);cursor:pointer;margin:14px 0 6px}
+.history li{color:var(--muted);font-variant-numeric:tabular-nums;margin:3px 0}.history b{color:var(--text)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}.run{animation:pulse 1.2s ease-in-out infinite}
+.empty{color:var(--dim);padding:18px 0}
+</style></head><body>
+<header><h1>Boundary Lab farm<small id="addr"></small></h1><div class="state" id="state">connecting…</div></header>
+<div class="hero">
+ <div class="tile"><div class="k">Solved</div><div class="v" id="t-done">–</div></div>
+ <div class="tile"><div class="k">Elapsed</div><div class="v" id="t-el">–</div></div>
+ <div class="tile"><div class="k">Remaining (estimate)</div><div class="v" id="t-eta">–</div></div>
+ <div class="tile"><div class="k">Farm throughput</div><div class="v" id="t-rate">–</div></div>
+</div>
+<section><h2>Frequencies: who is solving what</h2><div id="strips"></div><div class="legend" id="legend"></div></section>
+<section class="lanes"><h2>Batches over time</h2><div id="lanes"></div></section>
+<details><summary>Table view</summary><div id="table"></div></details>
+<details><summary>Recent jobs</summary><ul class="history" id="history"></ul></details>
+<div id="tip"></div>
+<script>
+const SERIES=["#3987e5","#d95926","#199e70","#c98500","#d55181","#9085e9"], QUEUED="#3a3a37", RUN_RING="#f0efec";
+const colorOf=new Map(); function col(name){ if(!name) return QUEUED; if(!colorOf.has(name)) colorOf.set(name,SERIES[colorOf.size%SERIES.length]); return colorOf.get(name); }
+const fmtT=s=>s==null?"–":(s<90?s.toFixed(0)+" s":s<5400?(s/60).toFixed(1)+" min":(s/3600).toFixed(2)+" h");
+const fmtF=f=>f>=1000?(f/1000).toFixed(f%1000?2:0)+" kHz":f.toFixed(f%1?1:0)+" Hz";
+const tip=document.getElementById("tip");
+function showTip(e,html){tip.innerHTML=html;tip.style.display="block";tip.style.left=(e.clientX+14)+"px";tip.style.top=(e.clientY+14)+"px";}
+function hideTip(){tip.style.display="none";}
+document.getElementById("addr").textContent=location.host;
+function strips(jobs){
+  const host=document.getElementById("strips");
+  if(!jobs.length){host.innerHTML='<div class="empty">No job yet. Press Solve in Boundary Lab with its solver set to this farm.</div>';return;}
+  host.innerHTML=jobs.map((j,i)=>`<div style="margin:6px 0 2px;color:#c3c2b7;font-size:12px">${j.state==="running"?"solving":j.state} · ${j.done}/${j.frequency_count} · ${j.gib_estimate} GiB · eligible: ${(j.eligible_workers||[]).join(", ")}</div><div id="strip${i}"></div>`).join("");
+  jobs.forEach((j,i)=>strip(j,document.getElementById("strip"+i)));
+}
+function strip(job,el){
+  const W=Math.max(600,el.clientWidth||900),H=64,L=40,R=12,T=10,B=22, n=job.frequencies.length;
+  // the GUI requests frequencies coarse-to-fine: sort by value for the axis
+  const order=[...Array(n).keys()].sort((a,b)=>job.frequencies_hz[a]-job.frequencies_hz[b]);
+  const f=order.map(i=>job.frequencies_hz[i]), lo=Math.log10(f[0]), hi=Math.log10(f[n-1]), span=Math.max(hi-lo,1e-6);
+  const x=i=>L+(Math.log10(f[i])-lo)/span*(W-L-R);
+  let s=`<svg viewBox="0 0 ${W} ${H}" height="${H}">`;
+  // recessive axis
+  s+=`<line x1="${L}" x2="${W-R}" y1="${H-B+0.5}" y2="${H-B+0.5}" stroke="#34342f"/>`;
+  for(const t of [100,200,500,1000,2000,5000,10000,20000]){ if(t<f[0]||t>f[n-1]) continue; const xx=L+(Math.log10(t)-lo)/span*(W-L-R); s+=`<text x="${xx}" y="${H-4}" fill="#7c7b74" font-size="10" text-anchor="middle">${t>=1000?t/1000+"k":t}</text>`; }
+  for(let i=0;i<n;i++){
+    const e=job.frequencies[order[i]]; const xl=i?(x(i-1)+x(i))/2:x(i)-(n>1?(x(1)-x(0))/2:6), xr=i<n-1?(x(i)+x(i+1))/2:x(i)+(n>1?(x(n-1)-x(n-2))/2:6);
+    const w=Math.max(2,xr-xl-2), c=col(e.worker), run=e.state==="running"||e.state==="assigned", done=e.state==="done";
+    s+=`<g data-i="${i}"><rect x="${xl+1}" y="${T}" width="${w}" height="${H-T-B-2}" rx="3" fill="${done?c:(run?c:QUEUED)}" fill-opacity="${done?1:(run?.35:1)}" stroke="${run?c:'none'}" stroke-width="${run?2:0}" class="${run?'run':''}"/><rect x="${xl+1}" y="${T}" width="${w}" height="${H-T-B-2}" fill="transparent"/></g>`;
+  }
+  s+=`</svg>`; el.innerHTML=s;
+  el.querySelectorAll("g").forEach(g=>{const e=job.frequencies[order[+g.dataset.i]];
+    g.addEventListener("mousemove",ev=>showTip(ev,`<b>${fmtF(e.freq_hz)}</b><br><span class="m">${e.state}</span>${e.worker?` · <span style="color:${col(e.worker)}">${e.worker}</span>`:""}${e.batch!=null?`<br><span class="m">batch ${e.batch+1}</span>`:""}${e.done_at!=null?`<br><span class="m">done at ${fmtT(e.done_at)}</span>`:""}`));
+    g.addEventListener("mouseleave",hideTip);});
+}
+function legend(workers,job){
+  const range=w=>{const b=w.current_batch; if(!b.length||!job) return "solving"; const f=job.frequencies_hz; return `solving ${fmtF(f[b[0]])} – ${fmtF(f[b[b.length-1]])}`;};
+  document.getElementById("legend").innerHTML=workers.map(w=>`<div class="chip"><i style="background:${col(w.name)}"></i><b>${w.name}</b><span>${w.backend_id?w.backend_id.replace("beat_",""):"–"}</span><span>${w.solved} solved</span><span>${w.seconds_per_frequency!=null?w.seconds_per_frequency.toFixed(1)+" s/freq":""}</span><span class="st ${w.down?'down':(w.busy?'busy':'')}">${w.down?"down":(w.busy?range(w):"idle")}</span></div>`).join("");
+}
+function lanes(job,workers){
+  const el=document.getElementById("lanes"); if(!job){el.innerHTML="";return;}
+  const total=Math.max(job.elapsed_s,1), W=Math.max(500,(el.clientWidth||800)-130);
+  el.innerHTML=workers.map(w=>{const items=job.timeline.filter(t=>t.worker===w.name);
+    const blocks=items.map(t=>{const x=t.start/total*W, e=(t.end??job.elapsed_s), wd=Math.max(3,(e-t.start)/total*W-2);
+      return `<g><rect x="${x}" y="4" width="${wd}" height="16" rx="3" fill="${col(w.name)}" fill-opacity="${t.outcome==='failed'?.3:(t.end==null?.55:1)}" stroke="${t.outcome==='failed'?'#d03b3b':'none'}" class="${t.end==null?'run':''}"><title>batch ${t.batch+1}: ${t.indices.length} freqs, ${fmtF(job.frequencies_hz[t.indices[0]])} … ${fmtF(job.frequencies_hz[t.indices[t.indices.length-1]])}, ${fmtT(t.start)} → ${t.end==null?"running":fmtT(t.end)} (${t.outcome})</title></rect></g>`;}).join("");
+    return `<div class="row"><div class="n">${w.name}</div><svg viewBox="0 0 ${W} 24" height="24"><line x1="0" x2="${W}" y1="12" y2="12" stroke="#2a2a27"/>${blocks}</svg></div>`;}).join("")
+   +`<div class="row"><div class="n"></div><div style="color:#7c7b74;font-size:11px;display:flex;justify-content:space-between"><span>0</span><span>${fmtT(job.elapsed_s)}</span></div></div>`;
+}
+function table(job){const el=document.getElementById("table"); if(!job){el.innerHTML="";return;}
+  el.innerHTML=`<table><tr><th>Frequency</th><th>State</th><th>Worker</th><th>Batch</th><th>Assigned</th><th>Done</th></tr>`+job.frequencies.map(e=>`<tr><td>${fmtF(e.freq_hz)}</td><td>${e.state}</td><td>${e.worker??"–"}</td><td>${e.batch!=null?e.batch+1:"–"}</td><td>${fmtT(e.assigned_at)}</td><td>${fmtT(e.done_at)}</td></tr>`).join("")+`</table>`;}
+function history(h){document.getElementById("history").innerHTML=h.length?h.map(j=>`<li><b>${j.done}/${j.frequency_count}</b> frequencies · ${j.state} · ${fmtT(j.elapsed_s)} · ${j.per_worker.map(w=>`${w.name} ${w.solved}`).join(", ")}</li>`).join(""):"<li>none yet</li>";}
+async function tick(){
+  try{const r=await fetch("/v1/farm/status",{cache:"no-store"}); const d=await r.json(); const job=d.job;
+    const jobs=d.jobs||(job?[job]:[]);
+    document.getElementById("state").textContent=jobs.length?`${jobs.length} job${jobs.length>1?"s":""} active`:(job?job.state+" · idle":"idle");
+    document.getElementById("t-done").innerHTML=job?`${job.done}<small>/ ${job.frequency_count}</small>`:"–";
+    document.getElementById("t-el").textContent=job?fmtT(job.elapsed_s):"–";
+    document.getElementById("t-eta").textContent=job&&job.state==="running"?fmtT(job.eta_s):(job?"done":"–");
+    const rate=d.workers.reduce((a,w)=>a+(w.solved&&w.seconds&&!w.down?w.solved/w.seconds:0),0);
+    document.getElementById("t-rate").innerHTML=rate?`${(rate*60).toFixed(1)}<small>freq / min</small>`:"–";
+    d.workers.forEach(w=>col(w.name)); strips(jobs.length?jobs:(job?[job]:[])); legend(d.workers,job); lanes(job,d.workers); table(job); history(d.history);
+  }catch(e){document.getElementById("state").textContent="farm unreachable";}
+}
+tick(); setInterval(tick,600); addEventListener("resize",tick);
+</script></body></html>
