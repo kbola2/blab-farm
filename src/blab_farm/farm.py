@@ -306,15 +306,18 @@ class Farm:
         return (sum(1 for w in self.workers if self.eligible(w, job) and not w.down), job.started_wall)
 
     def _pick(self, worker):
+        """An open batch from the highest-priority job first; only when no job has an open batch left may a
+        worker duplicate a straggler's running batch."""
         with self.sched_lock:
-            for job in sorted(self.active_jobs(), key=self._priority):
-                if job.cancelled or not self.eligible(worker, job) or not self.host_headroom(worker, job):
-                    continue
-                batch = self._take(job, worker)
-                if batch is not None:
-                    worker.current = batch
-                    worker.current_gib = job.gib
-                    return job, batch
+            jobs = [job for job in sorted(self.active_jobs(), key=self._priority)
+                    if not job.cancelled and self.eligible(worker, job) and self.host_headroom(worker, job)]
+            for speculate in (False, True):
+                for job in jobs:
+                    batch = self._take(job, worker if speculate else None)
+                    if batch is not None:
+                        worker.current = batch
+                        worker.current_gib = job.gib
+                        return job, batch
         return None, None
 
     def _worker_loop(self, worker):
@@ -568,10 +571,23 @@ class Farm:
                 return job.pending.popleft()
             return self._speculate(job, worker)
 
+    @staticmethod
+    def _rate(worker):
+        """Seconds per frequency: this job's measurement, else the worker's lifetime average, else unknown."""
+        if worker is None:
+            return None
+        if worker.solved:
+            return worker.seconds / worker.solved
+        if worker.solved_total:
+            return worker.seconds_total / worker.solved_total
+        return None
+
     def _speculate(self, job, worker):
-        """Queue empty: an idle fast worker duplicates the batch of the slowest running worker when it
-        would finish well before that worker does. Results are deduplicated per frequency, so the first
-        copy wins and the straggler's late copy is ignored. At most one duplicate per batch."""
+        """No open batch anywhere: an idle fast worker duplicates the batch of the slowest running worker when
+        it would finish well before that worker does. Results are deduplicated per frequency, so the first copy
+        wins and the straggler's late copy is ignored. At most one duplicate per batch. A worker whose speed
+        is not known yet is not presumed slow: its batch is duplicated only once it has already run longer
+        than twice what the duplicate would take."""
         if worker is None or not worker.solved:
             return None
         mine = worker.seconds / worker.solved
@@ -584,9 +600,15 @@ class Farm:
             remaining_indices = [i for i in entry["indices"] if i not in job.received]
             if not remaining_indices:
                 continue
-            theirs = (other.seconds / other.solved) if other and other.solved else None
-            their_remaining = (len(remaining_indices) * theirs - max(0.0, now - entry["start"])) if theirs else float("inf")
+            elapsed = max(0.0, now - entry["start"])
             my_time = len(remaining_indices) * mine
+            theirs = self._rate(other)
+            if theirs is None:
+                if elapsed <= 2 * my_time:
+                    continue
+                their_remaining = elapsed  # unknown speed, already overdue: assume as long again
+            else:
+                their_remaining = len(remaining_indices) * theirs - elapsed
             if their_remaining > 2 * my_time and their_remaining - my_time > best_gain:
                 best, best_gain = entry, their_remaining - my_time
         if best is None:

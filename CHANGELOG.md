@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 (2026-10-21)
+
+- Scheduling: a worker takes an open batch from any job before it may duplicate a straggler's batch
+  (previously an empty queue on the first job let it duplicate there while a later job still had open
+  batches), and a worker whose speed is not yet known is no longer presumed infinitely slow: its batch is
+  duplicated only once it has run longer than twice what the duplicate would take. Fast machines still
+  take more batches; they just stop stealing batches that were going to finish anyway.
+
 ## 0.1.2 (2026-10-21)
 
 - Fix: a server's capabilities list every backend it could run, so the farm took the first (alphabetically

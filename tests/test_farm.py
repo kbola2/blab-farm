@@ -377,6 +377,35 @@ def test_registration_updates_caps_discovery_guessed(farm):
     assert live.workers[0].backend_id == "beat_metal", "the worker's own statement beats the guess"
 
 
+def test_open_batches_of_a_later_job_come_before_duplicating_a_straggler(farm):
+    fast, slow = FakeWorker("fast", delay=0.05), FakeWorker("slow", delay=0.8)
+    url, live = farm([fast, slow], batch_size=2)
+    _, first = call(url, "/v1/jobs", data=bundle([100.0, 200.0, 300.0, 400.0]), method="POST")
+    _, second = call(url, "/v1/jobs", data=bundle([500.0, 600.0, 700.0, 800.0]), method="POST")
+    a = drain(url, first["job_id"], timeout=30); b = drain(url, second["job_id"], timeout=30)
+    assert a[-1]["type"] == "completed" and b[-1]["type"] == "completed"
+    job_a, job_b = live.jobs[first["job_id"]], live.jobs[second["job_id"]]
+    timeline_a = [dict(t, start=job_a.started + t["start"]) for t in job_a.timeline]   # absolute times
+    timeline_b = [dict(t, start=job_b.started + t["start"]) for t in job_b.timeline]
+    # "speculated" marks the victim entry; the duplicate is the later entry for the same batch
+    dups_a = [t for t in timeline_a if any(o["batch"] == t["batch"] and o["start"] < t["start"] for o in timeline_a)]
+    first_dup = min((t["start"] for t in dups_a if t["start"] >= job_b.started), default=None)
+    last_open_b = max(t["start"] for t in timeline_b if t["worker"] == "fast")
+    assert first_dup is None or first_dup >= last_open_b, "fast duplicated job A while job B still had open batches"
+
+
+def test_unknown_speed_is_not_presumed_slow(farm):
+    fast, fresh = FakeWorker("fast", delay=0.005), FakeWorker("fresh", delay=0.2)
+    url, live = farm([fast, fresh], batch_size=1)
+    _, reply = call(url, "/v1/jobs", data=bundle([100.0, 200.0, 300.0]), method="POST")
+    events = drain(url, reply["job_id"], timeout=30)
+    assert events[-1]["type"] == "completed"
+    timeline = live.jobs[reply["job_id"]].summary()["timeline"]
+    for victim in [t for t in timeline if t.get("speculated")]:
+        duplicate = next(o for o in timeline if o["batch"] == victim["batch"] and o is not victim)
+        assert duplicate["start"] - victim["start"] >= 2 * 0.005 - 0.001, "duplicated a batch that had barely started"
+
+
 def test_idle_fast_worker_duplicates_a_straggler_batch(farm):
     fast, slow = FakeWorker("fast", delay=0.005), FakeWorker("slow", delay=0.6)
     url, live = farm([fast, slow], batch_size=2)
