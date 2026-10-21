@@ -406,6 +406,19 @@ def test_unknown_speed_is_not_presumed_slow(farm):
         assert duplicate["start"] - victim["start"] >= 2 * 0.005 - 0.001, "duplicated a batch that had barely started"
 
 
+def test_superseded_batch_is_cancelled_on_its_worker(farm):
+    fast, slow = FakeWorker("fast", delay=0.005), FakeWorker("slow", delay=1.5)
+    url, live = farm([fast, slow], batch_size=1)
+    _, reply = call(url, "/v1/jobs", data=bundle([100.0, 200.0, 300.0]), method="POST")
+    events = drain(url, reply["job_id"], timeout=30)
+    assert events[-1]["type"] == "completed"
+    deadline = time.time() + 3
+    while time.time() < deadline and not any(ev[-1]["type"] == "cancelled" for ev in slow.jobs.values()):
+        time.sleep(0.02)
+    assert any(ev[-1]["type"] == "cancelled" for ev in slow.jobs.values()), "the slow worker kept solving a batch nobody needed"
+    assert live.workers[1].current is None, "the slow worker must be free again"
+
+
 def test_idle_fast_worker_duplicates_a_straggler_batch(farm):
     fast, slow = FakeWorker("fast", delay=0.005), FakeWorker("slow", delay=0.6)
     url, live = farm([fast, slow], batch_size=2)

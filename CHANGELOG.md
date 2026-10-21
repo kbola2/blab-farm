@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.4 (2026-10-21)
+
+- Fix: when a job completed (or a batch was finished by a faster duplicate), the slow worker's sub-job
+  kept running to the end on its machine, unneeded, and the worker stayed busy for other jobs (a CPU
+  worker was seen grinding for 40 minutes on two frequencies that had long been delivered). Leftover
+  sub-jobs are now cancelled on the worker the moment they are no longer needed, and the worker is
+  free again at once.
+
 ## 0.1.3 (2026-10-21)
 
 - Scheduling: a worker takes an open batch from any job before it may duplicate a straggler's batch

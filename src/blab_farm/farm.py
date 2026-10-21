@@ -346,6 +346,7 @@ class Farm:
                     if e["end"] is None:
                         e.update(end=now, outcome="superseded")
                 job.append({"type": "completed", "worker": self._provenance(job)})
+                leftovers = dict(job.active)  # sub-jobs still running on workers: stop them, they are waste
             elif not job.pending and not in_flight:
                 job.append({"type": "failed", "worker": self._provenance(job),
                             "error": f"Farm solved {received} of {len(job.frequencies)} frequencies; "
@@ -354,6 +355,14 @@ class Farm:
                 return
             job.terminal = True
             job.finished = time.monotonic()
+        for name, sub in locals().get("leftovers", {}).items():
+            other = next((w for w in job.workers if w.name == name), None)
+            if other and sub:
+                try:
+                    other.call(f"/v1/jobs/{sub}", method="DELETE")
+                    LOGGER.info("%s: batch no longer needed, cancelled on the worker", name)
+                except WorkerError:
+                    pass
         self.history.appendleft({k: v for k, v in job.summary().items() if k not in ("frequencies", "timeline")}
                                 | {"per_worker": [w.snapshot() for w in job.workers]})
         elapsed = time.monotonic() - job.started
@@ -708,12 +717,16 @@ class Farm:
         got = set()
         try:
             while True:
-                if job.cancelled:
+                with job.lock:
+                    unwanted = job.cancelled or job.terminal or all(i in job.received for i in batch)
+                if unwanted:  # cancelled, finished elsewhere, or every frequency of this batch already came back
                     try:
                         worker.call(f"/v1/jobs/{sub}", method="DELETE")
                     except WorkerError:
                         pass
-                    return
+                    if job.cancelled:
+                        return
+                    raise WorkerError(0, "superseded")
                 reply = worker.call(f"/v1/jobs/{sub}?cursor={cursor}")
                 cursor = reply["next_cursor"]
                 for event in reply["events"]:
