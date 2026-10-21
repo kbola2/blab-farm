@@ -47,7 +47,7 @@ def cmd_serve(args):
 
 def cmd_worker(args):
     if args.uninstall_service:
-        return uninstall_service()
+        return uninstall_service(args.port)
     if args.install_service:
         return install_service(args)
     return run_worker(args)
@@ -107,7 +107,7 @@ def main(argv=None):
     w.add_argument("--root", default=os.path.expanduser("~/.blab-farm/server-jobs"))
     w.add_argument("--no-caffeinate", action="store_true", help="do not keep the machine awake while serving")
     w.add_argument("--install-service", action="store_true", help="install as a login service (launchd / systemd user / Task Scheduler) and start it")
-    w.add_argument("--uninstall-service", action="store_true")
+    w.add_argument("--uninstall-service", action="store_true", help="remove the service for this --port")
     w.set_defaults(func=cmd_worker)
 
     s = sub.add_parser("status", help="show the farm's workers and jobs")

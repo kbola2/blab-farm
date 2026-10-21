@@ -14,7 +14,11 @@ import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-SERVICE_LABEL = "com.blab-farm.worker"
+SERVICE_LABEL = "com.blab-farm.worker"  # one service per port: label gets "-<port>" appended
+
+
+def service_label(port):
+    return f"{SERVICE_LABEL}-{port}"
 
 
 def total_ram_gib():
@@ -122,33 +126,34 @@ def _worker_args(args):
 
 
 def install_service(args):
+    label = service_label(args.port)
     exe = shutil.which("blab-farm") or f"{sys.executable} -m blab_farm.cli"
     program = exe.split() + _worker_args(args)
     log_dir = Path.home() / ("Library/Logs" if sys.platform == "darwin" else ".blab-farm")
     log_dir.mkdir(parents=True, exist_ok=True)
     if sys.platform == "darwin":
-        plist = Path.home() / "Library/LaunchAgents" / f"{SERVICE_LABEL}.plist"
+        plist = Path.home() / "Library/LaunchAgents" / f"{label}.plist"
         plist.parent.mkdir(parents=True, exist_ok=True)
         items = "".join(f"<string>{a}</string>" for a in program)
         plist.write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>{SERVICE_LABEL}</string>
+  <key>Label</key><string>{label}</string>
   <key>ProgramArguments</key><array>{items}</array>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string><key>HOME</key><string>{Path.home()}</string></dict>
   <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>15</integer>
-  <key>StandardOutPath</key><string>{log_dir}/blab-farm-worker.log</string>
-  <key>StandardErrorPath</key><string>{log_dir}/blab-farm-worker.log</string>
+  <key>StandardOutPath</key><string>{log_dir}/blab-farm-worker-{args.port}.log</string>
+  <key>StandardErrorPath</key><string>{log_dir}/blab-farm-worker-{args.port}.log</string>
 </dict></plist>
 """)
         uid = os.getuid()
-        subprocess.call(["launchctl", "bootout", f"gui/{uid}/{SERVICE_LABEL}"], stderr=subprocess.DEVNULL)
+        subprocess.call(["launchctl", "bootout", f"gui/{uid}/{label}"], stderr=subprocess.DEVNULL)
         subprocess.check_call(["launchctl", "bootstrap", f"gui/{uid}", str(plist)])
-        subprocess.check_call(["launchctl", "kickstart", "-k", f"gui/{uid}/{SERVICE_LABEL}"])
-        print(f"installed launchd agent {SERVICE_LABEL}; log: {log_dir}/blab-farm-worker.log")
+        subprocess.check_call(["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"])
+        print(f"installed launchd agent {label}; log: {log_dir}/blab-farm-worker-{args.port}.log")
         print("For an unattended Mac also enable automatic login (System Settings > Users & Groups) and prevent sleep in Energy settings.")
     elif sys.platform.startswith("linux"):
-        unit = Path.home() / ".config/systemd/user/blab-farm-worker.service"
+        unit = Path.home() / ".config/systemd/user" / f"blab-farm-worker-{args.port}.service"
         unit.parent.mkdir(parents=True, exist_ok=True)
         unit.write_text(f"""[Unit]
 Description=blab-farm worker (Boundary Lab server)
@@ -163,28 +168,29 @@ RestartSec=15
 WantedBy=default.target
 """)
         subprocess.check_call(["systemctl", "--user", "daemon-reload"])
-        subprocess.check_call(["systemctl", "--user", "enable", "--now", "blab-farm-worker.service"])
+        subprocess.check_call(["systemctl", "--user", "enable", "--now", f"blab-farm-worker-{args.port}.service"])
         subprocess.call(["loginctl", "enable-linger", os.environ.get("USER", "")])
-        print("installed systemd user service blab-farm-worker (lingering enabled so it runs without a login session)")
+        print(f"installed systemd user service blab-farm-worker-{args.port} (lingering enabled so it runs without a login session)")
     elif sys.platform == "win32":
         task = " ".join(f'"{a}"' if " " in a else a for a in program)
-        subprocess.check_call(["schtasks", "/Create", "/F", "/SC", "ONLOGON", "/TN", "blab-farm worker", "/TR", task])
-        subprocess.check_call(["schtasks", "/Run", "/TN", "blab-farm worker"])
+        subprocess.check_call(["schtasks", "/Create", "/F", "/SC", "ONLOGON", "/TN", f"blab-farm worker {args.port}", "/TR", task])
+        subprocess.check_call(["schtasks", "/Run", "/TN", f"blab-farm worker {args.port}"])
         print("installed a Task Scheduler task 'blab-farm worker' that runs at logon (untested path: please report issues)")
     else:
         raise SystemExit(f"no service installer for {sys.platform}")
     return 0
 
 
-def uninstall_service():
+def uninstall_service(port):
+    label = service_label(port)
     if sys.platform == "darwin":
-        plist = Path.home() / "Library/LaunchAgents" / f"{SERVICE_LABEL}.plist"
-        subprocess.call(["launchctl", "bootout", f"gui/{os.getuid()}/{SERVICE_LABEL}"], stderr=subprocess.DEVNULL)
+        plist = Path.home() / "Library/LaunchAgents" / f"{label}.plist"
+        subprocess.call(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"], stderr=subprocess.DEVNULL)
         plist.unlink(missing_ok=True)
     elif sys.platform.startswith("linux"):
-        subprocess.call(["systemctl", "--user", "disable", "--now", "blab-farm-worker.service"])
-        (Path.home() / ".config/systemd/user/blab-farm-worker.service").unlink(missing_ok=True)
+        subprocess.call(["systemctl", "--user", "disable", "--now", f"blab-farm-worker-{port}.service"])
+        (Path.home() / ".config/systemd/user" / f"blab-farm-worker-{port}.service").unlink(missing_ok=True)
     elif sys.platform == "win32":
-        subprocess.call(["schtasks", "/Delete", "/F", "/TN", "blab-farm worker"])
-    print("worker service removed")
+        subprocess.call(["schtasks", "/Delete", "/F", "/TN", f"blab-farm worker {port}"])
+    print(f"worker service for port {port} removed")
     return 0

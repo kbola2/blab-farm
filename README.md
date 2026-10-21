@@ -89,6 +89,7 @@ GUI / blab CLI --(blab-remote v2)--> blab-farm serve --(blab-remote v2)--> blab 
 | `worker --max-gib N` | what this machine may take (default 70 % of its RAM) |
 | `worker --backend metal|cpu|cuda|rocm|auto` | passed to `blab server` |
 | `worker --blab PATH` | the `blab` command or a python with Boundary Lab installed, if not on PATH |
+| `worker --port N` | one worker per port; run a GPU worker and a CPU worker on the same machine on two ports, each with its own service and a cap of about a third of the RAM |
 | `serve --ordered` | stream results in request order (buffers; the GUI does not need this) |
 | `BLAB_FARM_TOKEN`, `BLAB_SERVER_TOKEN` | optional bearer keys: clients to the farm, farm to workers |
 
