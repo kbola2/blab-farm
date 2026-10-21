@@ -297,9 +297,42 @@ def test_memory_caps_route_big_models_only_to_big_workers(farm):
     assert events[-1]["type"] == "completed"
     assert {e["farm_worker"] for e in events if e["type"] == "result"} == {"big"}
     assert blab_farm.parse_worker("http://h:1=mbp@48", None).max_gib == 48.0
+    shared = blab_farm.parse_worker("http://h:1=air-metal@12/14", None)
+    assert (shared.max_gib, shared.host_gib, shared.host) == (12.0, 14.0, "h")
     assert blab_farm.parse_worker("http://h:1@8", None).max_gib == 8.0 and blab_farm.parse_worker("http://h:1=x", None).max_gib is None
     mesh = b"$MeshFormat\n2.2 0 8\n$EndMeshFormat\n$Elements\n3\n1 2 2 1 1 1 2 3\n2 2 2 1 1 2 3 4\n3 15 2 1 1 1\n$EndElements\n"
-    assert blab_farm.estimate_gib({"assets/x.msh": mesh}) == pytest.approx(4 * 1 * 1 * 8 / 2 ** 30)
+    assert blab_farm.estimate_gib({"assets/x.msh": mesh}) == pytest.approx(blab_farm.GIB_PER_DOF2 + blab_farm.GIB_FIXED)
+    cpu = blab_farm.Worker("http://h:2", name="cpu"); cpu.backend_id = "beat_cpu"
+    gpu = blab_farm.Worker("http://h:1", name="gpu"); gpu.backend_id = "beat_metal"
+    assert cpu.need(10.0) == 20.0 and gpu.need(10.0) == 10.0, "a CPU worker solves in complex128: twice the memory"
+
+
+def test_workers_on_one_machine_share_its_memory_budget(farm):
+    gpu, cpu = FakeWorker("gpu", delay=0.05), FakeWorker("cpu", delay=0.05)
+    url, live = farm([gpu, cpu], batch_size=1)
+    for w in live.workers:
+        w.host_gib = 1.5   # the fakes are CPU workers, so each tiny job counts 2 x ~0.5 GiB: one fits, two do not
+    _, reply = call(url, "/v1/jobs", data=bundle([100.0, 200.0, 300.0, 400.0]), method="POST")
+    events = drain(url, reply["job_id"])
+    assert events[-1]["type"] == "completed"
+    starts = [e for e in live.jobs[reply["job_id"]].timeline]
+    for a in starts:
+        for b in starts:
+            if a is not b and a["worker"] != b["worker"]:
+                overlap = a["end"] is not None and b["end"] is not None and a["start"] < b["end"] and b["start"] < a["end"]
+                assert not overlap, "both workers of one machine ran batches at the same time"
+
+
+def test_registration_updates_caps_discovery_guessed(farm):
+    w = FakeWorker("guess")
+    url, live = farm([w])
+    live.discovered_max_gib = 48.0
+    live.workers[0].max_gib = 48.0
+    body = json.dumps({"url": w.url, "name": "real name", "max_gib": 5.0, "host_gib": 11.0}).encode()
+    request = Request(url + "/v1/farm/register", data=body, method="POST", headers={"Content-Type": "application/json"})
+    with urlopen(request, timeout=5) as response:
+        assert json.loads(response.read())["name"] == "real name"
+    assert (live.workers[0].max_gib, live.workers[0].host_gib) == (5.0, 11.0)
 
 
 def test_idle_fast_worker_duplicates_a_straggler_batch(farm):

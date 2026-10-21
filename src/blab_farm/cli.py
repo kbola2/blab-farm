@@ -80,7 +80,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("serve", help="run the coordinator: one Boundary Lab Server address backed by many workers")
-    p.add_argument("--worker", action="append", default=[], metavar="URL[=name][@max_gib]",
+    p.add_argument("--worker", action="append", default=[], metavar="URL[=name][@max_gib[/host_gib]]",
                    help="a Boundary Lab server to use (repeat); workers can also join by themselves")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8766)
@@ -101,7 +101,10 @@ def main(argv=None):
     w.add_argument("--port", type=int, default=8765)
     w.add_argument("--backend", default="auto", help="auto, cpu, metal, cuda or rocm (passed to blab server)")
     w.add_argument("--name", default=None, help="name shown on the dashboard (default: this computer's name)")
-    w.add_argument("--max-gib", type=float, default=None, help="dense-BEM memory this machine may take (default: 70%% of RAM)")
+    w.add_argument("--max-gib", type=float, default=None,
+                   help="largest job this worker takes, in GiB as the farm estimates it (default: the machine budget; half of it for a CPU worker)")
+    w.add_argument("--host-gib", type=float, default=None,
+                   help="memory budget of this whole machine, shared by all its workers (default: 70%% of RAM)")
     w.add_argument("--blab", default=os.environ.get("BLAB_CLI", ""), help="path to the 'blab' command or a python with blab installed")
     w.add_argument("--julia", default=os.environ.get("BLAB_JULIA_EXE", ""), help="Julia executable for the engine (optional)")
     w.add_argument("--root", default=os.path.expanduser("~/.blab-farm/server-jobs"))

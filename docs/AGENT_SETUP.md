@@ -78,8 +78,10 @@ Scheduler on Windows), starts it, restarts it on failure, keeps the machine awak
 `~/Library/Logs/blab-farm-worker.log` (macOS) or `~/.blab-farm/` (Linux). On an unattended Mac the user
 must also enable automatic login and prevent sleep when the display is off; say so.
 
-Memory cap: the worker announces 70 percent of its RAM by default. Override with `--max-gib N` on a
-machine that shares memory with other work (for example the one running the GUI).
+Memory: the worker announces a machine budget of 70 percent of its RAM (`--host-gib N` to change it, for
+example on the machine that also runs the GUI) and takes jobs up to that budget (`--max-gib N`); a CPU
+worker defaults to half the budget because it solves in complex128 and is counted at twice the memory.
+Two workers on one machine never run jobs that together exceed the budget.
 
 ## 4. Start the coordinator (one machine)
 

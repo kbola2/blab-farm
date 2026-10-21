@@ -84,12 +84,13 @@ GUI / blab CLI --(blab-remote v2)--> blab-farm serve --(blab-remote v2)--> blab 
 
 | Option | Meaning |
 |---|---|
-| `serve --worker URL[=name][@max_gib]` | pin a worker instead of discovery; `@24` caps it at 24 GiB of dense BEM |
+| `serve --worker URL[=name][@max_gib[/host_gib]]` | pin a worker instead of discovery; `@12/14`: jobs up to 12 GiB, and all workers on that machine together stay within 14 GiB |
 | `serve --discovered-max-gib N` | cap for workers that join without stating their own |
-| `worker --max-gib N` | what this machine may take (default 70 % of its RAM) |
+| `worker --host-gib N` | memory budget of the whole machine, shared by its workers (default 70 % of RAM) |
+| `worker --max-gib N` | largest job this worker takes (default: the machine budget; half of it for a CPU worker, which needs twice the memory per mesh) |
 | `worker --backend metal|cpu|cuda|rocm|auto` | passed to `blab server` |
 | `worker --blab PATH` | the `blab` command or a python with Boundary Lab installed, if not on PATH |
-| `worker --port N` | one worker per port; run a GPU worker and a CPU worker on the same machine on two ports, each with its own service and a cap of about a third of the RAM |
+| `worker --port N` | one worker per port; run a GPU worker and a CPU worker on the same machine on two ports, each with its own service; the machine budget keeps them from overcommitting the RAM together |
 | `serve --ordered` | stream results in request order (buffers; the GUI does not need this) |
 | `BLAB_FARM_TOKEN`, `BLAB_SERVER_TOKEN` | optional bearer keys: clients to the farm, farm to workers |
 
@@ -99,8 +100,11 @@ GUI / blab CLI --(blab-remote v2)--> blab-farm serve --(blab-remote v2)--> blab 
   (one study per band); the farm routes each to machines with enough memory.
 - Observation planes (the pressure animation) are not solved through a Boundary Lab Server, so not
   through the farm either; polars, balloons and probes are.
-- The memory estimate (four complex64 matrices on about half the triangle count) is a routing
-  heuristic, not a measurement. Set caps conservatively.
+- The memory estimate is measured, not guessed: a Metal/CUDA solve peaks at about 2.1 dense complex64
+  matrices on about half the triangle count, plus 0.5 GiB (Boundary Lab 0.5.0, LU or GMRES alike). CPU
+  workers solve in complex128 and are counted at twice that. It is still an estimate: keep caps below
+  what the machine can really spare. Two machines cannot share one matrix; see
+  [docs/POOLED_MEMORY.md](docs/POOLED_MEMORY.md) for what that would take.
 - Trusted-LAN tool: it binds all interfaces on purpose and has no accounts. Use the bearer keys or a
   VPN beyond a home or lab network.
 - Tested against Boundary Lab 0.5.0 / remote protocol v2. A protocol change upstream will need a

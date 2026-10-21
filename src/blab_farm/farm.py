@@ -45,11 +45,12 @@ class WorkerError(RuntimeError):
 class Worker:
     """One Boundary Lab server, addressed like the GUI addresses it."""
 
-    def __init__(self, url, *, name=None, token=None, max_gib=None):
+    def __init__(self, url, *, name=None, token=None, max_gib=None, host_gib=None):
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError(f"worker needs an http(s) base URL: {url}")
         self.url = url.rstrip("/")
+        self.host = parsed.hostname  # workers on one host share that machine's memory
         self.name = name or parsed.hostname
         self.token = token
         self.opener = build_opener(ProxyHandler({}))
@@ -59,10 +60,17 @@ class Worker:
         self.seconds = 0.0
         self.failures = 0
         self.current = None  # batch indices being solved right now
+        self.current_gib = 0.0  # estimate of the job that batch belongs to (for per-machine headroom)
         self.last_error = ""
         self.solved_total = 0
         self.seconds_total = 0.0
         self.max_gib = max_gib  # dense-BEM memory this worker may take on (None = unlimited)
+        self.host_gib = host_gib  # memory budget of the whole machine, shared by every worker on it (None = unknown)
+
+    def need(self, gib):
+        """What a job estimated at ``gib`` (Metal/CUDA, complex64) costs on this worker: the CPU backend solves
+        in complex128, so it needs twice the memory for the same mesh."""
+        return gib * (2.0 if (self.backend_id or "").endswith("cpu") else 1.0)
 
     def new_job(self):
         """Per-job counters drive the throughput estimate; lifetime totals are kept separately."""
@@ -76,6 +84,7 @@ class Worker:
         return {"name": self.name, "url": self.url, "backend_id": self.backend_id, "solved": self.solved,
                 "seconds": round(self.seconds, 2), "seconds_per_frequency": round(self.seconds / self.solved, 2) if self.solved else None,
                 "solved_total": self.solved_total + self.solved, "down": self.down, "busy": self.current is not None, "max_gib": self.max_gib,
+                "host": self.host, "host_gib": self.host_gib,
                 "current_batch": list(self.current or []), "failures": self.failures, "last_error": self.last_error}
 
     def call(self, path, *, data=None, method="GET", timeout=30):
@@ -128,9 +137,15 @@ def read_bundle(bundle):
     return envelope, assets
 
 
+GIB_PER_DOF2 = 2.1 * 8 / 2 ** 30   # measured: peak RSS of a Metal solve is ~2.1 dense complex64 matrices
+GIB_FIXED = 0.5                     # engine, caches, Krylov space and scratch
+
+
 def estimate_gib(assets):
-    """Rough dense-BEM need of a job from its mesh assets: four complex64 matrices on ~N/2 P1 unknowns,
-    N = triangles in Gmsh 2.2 assets (quarter or full as bundled). An estimate for routing, not a measurement."""
+    """Dense-BEM memory a job needs on a Metal/CUDA worker, from its mesh assets: P1 unknowns are about
+    half the triangle count (Gmsh 2.2 assets, quarter or full as bundled), and the engine's peak was
+    measured at 2.1 complex64 N x N matrices plus half a GiB whether it factors (LU) or iterates (GMRES).
+    A routing estimate, not a guarantee; CPU workers need twice this (see ``Worker.need``)."""
     triangles = 0
     for data in assets.values():
         text = data.decode("ascii", "ignore")
@@ -139,7 +154,7 @@ def estimate_gib(assets):
         body = text.split("$Elements", 1)[1].split("$EndElements", 1)[0].splitlines()[2:]
         triangles += sum(1 for line in body if line.split()[1:2] == ["2"])
     dofs = triangles / 2
-    return 4 * dofs * dofs * 8 / 2 ** 30
+    return GIB_PER_DOF2 * dofs * dofs + GIB_FIXED
 
 
 def sub_bundle(envelope, assets, frequencies):
@@ -250,8 +265,16 @@ class Farm:
         self.sched_lock = threading.RLock()
         self.loops = {}  # worker name -> thread
         self.closing = False
+        self.learn_backends()
         for worker in self.workers:
             self._start_loop(worker)
+
+    def learn_backends(self):
+        """Ask each pinned worker which backend it runs, so CPU workers are counted at twice the memory from the start."""
+        for worker in self.workers:
+            if worker.backend_id is None:
+                info = worker.capabilities()
+                worker.backend_id = next(iter(info.get("backend_ids") or []), None)
 
     def _start_loop(self, worker):
         if worker.name in self.loops:
@@ -265,7 +288,16 @@ class Farm:
         return [j for j in self.jobs.values() if not j.terminal]
 
     def eligible(self, worker, job):
-        return worker.max_gib is None or worker.max_gib >= job.gib
+        return worker.max_gib is None or worker.max_gib >= worker.need(job.gib)
+
+    def host_headroom(self, worker, job):
+        """A worker on a machine with a known budget may start a batch only if the batches already running
+        on that machine's other workers leave room for this one."""
+        if worker.host_gib is None:
+            return True
+        in_use = sum(w.need(w.current_gib) for w in self.workers
+                     if w is not worker and w.host == worker.host and w.current is not None)
+        return in_use == 0 or in_use + worker.need(job.gib) <= worker.host_gib  # alone on the machine: the cap decides
 
     def _priority(self, job):
         """Jobs few machines can hold go first, then by submission order."""
@@ -274,10 +306,12 @@ class Farm:
     def _pick(self, worker):
         with self.sched_lock:
             for job in sorted(self.active_jobs(), key=self._priority):
-                if job.cancelled or not self.eligible(worker, job):
+                if job.cancelled or not self.eligible(worker, job) or not self.host_headroom(worker, job):
                     continue
                 batch = self._take(job, worker)
                 if batch is not None:
+                    worker.current = batch
+                    worker.current_gib = job.gib
                     return job, batch
         return None, None
 
@@ -325,8 +359,9 @@ class Farm:
             self.current_job = next(iter(self.active_jobs()), job)
 
     # ----- workers joining on their own
-    def add_worker(self, url, *, name=None, token=None, max_gib=None):
-        """Add a server if it speaks the protocol; idempotent by URL. Returns (worker, added)."""
+    def add_worker(self, url, *, name=None, token=None, max_gib=None, host_gib=None, stated=False):
+        """Add a server if it speaks the protocol; idempotent by URL. Returns (worker, added). A worker's own
+        registration (``stated``) overrides the name and caps discovery guessed for it."""
         url = url.rstrip("/")
         with self.join_lock:
             for worker in self.workers:
@@ -334,11 +369,15 @@ class Farm:
                     if name and worker.name != name:  # a self-registration knows its real computer name
                         LOGGER.info("worker %s is %s", worker.name, name)
                         worker.name = name
+                    if stated and (worker.max_gib, worker.host_gib) != (max_gib, host_gib):
+                        LOGGER.info("worker %s caps: %s GiB, machine %s GiB", worker.name, max_gib, host_gib)
+                        worker.max_gib, worker.host_gib = max_gib, host_gib
                     return worker, False
-            worker = Worker(url, name=name, token=token, max_gib=max_gib)
+            worker = Worker(url, name=name, token=token, max_gib=max_gib, host_gib=host_gib)
             info = worker.capabilities()
             if info.get("protocol") != PROTOCOL:
                 raise ValueError(f"{url} is not a Boundary Lab server ({info.get('error', 'no protocol field')})")
+            worker.backend_id = next(iter(info.get("backend_ids") or []), None)  # CPU or GPU decides its memory factor
             self.workers.append(worker)
         LOGGER.info("worker joined: %-12s %s  state=%s  backends=%s", worker.name, url, info.get("state"), info.get("backend_ids"))
         self._start_loop(worker)
@@ -461,8 +500,8 @@ class Farm:
         job.gib = estimate_gib(assets)
         eligible = [w for w in self.workers if self.eligible(w, job)]
         if not eligible:
-            raise ValueError(f"No worker has room for this model (about {job.gib:.1f} GiB dense BEM); "
-                             f"caps: {[(w.name, w.max_gib) for w in self.workers]}")
+            raise ValueError(f"No worker has room for this model (about {job.gib:.1f} GiB dense BEM on a GPU worker, "
+                             f"twice that on a CPU worker); caps: {[(w.name, w.max_gib) for w in self.workers]}")
         batches = make_batches(count, len(eligible), self.batch_size)
         job.pending = deque(batches)
         job.attempts = {tuple(b): 0 for b in batches}
@@ -731,7 +770,8 @@ def create_http_server(farm, *, host="0.0.0.0", port=8766, token=None):
                         raise ValueError("A small JSON body is required.")
                     body = json.loads(self.rfile.read(length))
                     worker, added = farm.add_worker(str(body["url"]), name=body.get("name") or None, token=farm.worker_token,
-                                                    max_gib=body.get("max_gib", farm.discovered_max_gib))
+                                                    max_gib=body.get("max_gib", farm.discovered_max_gib),
+                                                    host_gib=body.get("host_gib"), stated=True)
                     self.reply(200, {"registered": True, "added": added, "name": worker.name, "url": worker.url})
                 elif self.command == "GET" and path.path in {"/", "/dashboard"}:
                     data = (Path(__file__).with_name("dashboard.html")).read_bytes()
@@ -800,17 +840,20 @@ def local_ip():
 
 
 def parse_worker(spec, token):
-    """URL[=name][@max_gib], e.g. http://192.168.1.86:8765=mbp@48 or http://127.0.0.1:8771=air-metal@8"""
+    """URL[=name][@max_gib[/host_gib]], e.g. http://192.168.1.86:8765=mbp@48 or http://127.0.0.1:8771=air-metal@12/14
+    (this worker takes jobs up to 12 GiB; all workers on that machine together stay within 14 GiB)."""
     url, _, rest = spec.partition("=")
     name, _, cap = rest.partition("@")
     if "@" in url:
         url, _, cap = url.partition("@")
-    return Worker(url, name=name or None, token=token, max_gib=float(cap) if cap else None)
+    cap, _, host_cap = cap.partition("/")
+    return Worker(url, name=name or None, token=token, max_gib=float(cap) if cap else None,
+                  host_gib=float(host_cap) if host_cap else None)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--worker", action="append", default=[], metavar="URL[=name][@max_gib]",
+    parser.add_argument("--worker", action="append", default=[], metavar="URL[=name][@max_gib[/host_gib]]",
                         help="a Boundary Lab server (repeat); e.g. http://192.168.1.20:8765=mbp@48 (cap in GiB of dense BEM)")
     parser.add_argument("--discovered-max-gib", type=float, default=None,
                         help="memory cap applied to workers found by discovery or registration")
