@@ -338,6 +338,10 @@ def test_independent_workers_ignore_the_machine_budget(farm):
     assert live.host_headroom(second, job) is True, "independent: only its own cap counts"
     assert blab_farm.parse_worker("http://h:1=x@12", None).shared is False
     assert blab_farm.parse_worker("http://h:1=x@12/14", None).shared is True
+    assert blab_farm.parse_worker("http://h:1=x@12/14+cpu", None).backend_id == "beat_cpu"
+    assert blab_farm.parse_worker("http://h:1=x+beat_metal", None).backend_id == "beat_metal"
+    assert blab_farm.guess_backend({"backend_ids": ["beat_cpu", "beat_metal"]}) == "beat_metal"
+    assert blab_farm.guess_backend({"backend_ids": ["beat_cpu"]}) == "beat_cpu"
 
 
 def test_discovery_probes_a_few_hosts_at_a_time(farm, monkeypatch):
@@ -364,11 +368,13 @@ def test_registration_updates_caps_discovery_guessed(farm):
     url, live = farm([w])
     live.discovered_max_gib = 48.0
     live.workers[0].max_gib = 48.0
-    body = json.dumps({"url": w.url, "name": "real name", "max_gib": 5.0, "host_gib": 11.0, "memory": "independent"}).encode()
+    body = json.dumps({"url": w.url, "name": "real name", "max_gib": 5.0, "host_gib": 11.0, "memory": "independent",
+                       "backend": "metal"}).encode()
     request = Request(url + "/v1/farm/register", data=body, method="POST", headers={"Content-Type": "application/json"})
     with urlopen(request, timeout=5) as response:
         assert json.loads(response.read())["name"] == "real name"
     assert (live.workers[0].max_gib, live.workers[0].host_gib, live.workers[0].shared) == (5.0, 11.0, False)
+    assert live.workers[0].backend_id == "beat_metal", "the worker's own statement beats the guess"
 
 
 def test_idle_fast_worker_duplicates_a_straggler_batch(farm):

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2 (2026-10-21)
+
+- Fix: a server's capabilities list every backend it could run, so the farm took the first (alphabetically
+  `beat_cpu`) and counted Metal workers at twice their memory. Workers now state their backend when they
+  register, pinned workers can say it in their spec (`URL@18/18+cpu`), and the guess prefers the GPU
+  backend until the worker's first accepted batch confirms it.
+
 ## 0.1.1 (2026-10-21)
 
 - Fix: LAN discovery opened one socket per host at once (253 on a /24), which on macOS's default limit of

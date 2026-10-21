@@ -45,7 +45,7 @@ class WorkerError(RuntimeError):
 class Worker:
     """One Boundary Lab server, addressed like the GUI addresses it."""
 
-    def __init__(self, url, *, name=None, token=None, max_gib=None, host_gib=None, shared=True):
+    def __init__(self, url, *, name=None, token=None, max_gib=None, host_gib=None, shared=True, backend_id=None):
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError(f"worker needs an http(s) base URL: {url}")
@@ -55,7 +55,7 @@ class Worker:
         self.token = token
         self.opener = build_opener(ProxyHandler({}))
         self.down = False
-        self.backend_id = None
+        self.backend_id = backend_id  # stated by the worker or its spec; else guessed at join, confirmed by its first batch
         self.solved = 0
         self.seconds = 0.0
         self.failures = 0
@@ -276,8 +276,7 @@ class Farm:
         """Ask each pinned worker which backend it runs, so CPU workers are counted at twice the memory from the start."""
         for worker in self.workers:
             if worker.backend_id is None:
-                info = worker.capabilities()
-                worker.backend_id = next(iter(info.get("backend_ids") or []), None)
+                worker.backend_id = guess_backend(worker.capabilities())
 
     def _start_loop(self, worker):
         if worker.name in self.loops:
@@ -362,7 +361,8 @@ class Farm:
             self.current_job = next(iter(self.active_jobs()), job)
 
     # ----- workers joining on their own
-    def add_worker(self, url, *, name=None, token=None, max_gib=None, host_gib=None, shared=True, stated=False):
+    def add_worker(self, url, *, name=None, token=None, max_gib=None, host_gib=None, shared=True, backend_id=None,
+                   stated=False):
         """Add a server if it speaks the protocol; idempotent by URL. Returns (worker, added). A worker's own
         registration (``stated``) overrides the name and caps discovery guessed for it."""
         url = url.rstrip("/")
@@ -376,12 +376,16 @@ class Farm:
                         LOGGER.info("worker %s caps: %s GiB, machine %s GiB, %s", worker.name, max_gib, host_gib,
                                     "shared" if shared else "independent")
                         worker.max_gib, worker.host_gib, worker.shared = max_gib, host_gib, shared
+                    if stated and backend_id and worker.backend_id != backend_id:
+                        worker.backend_id = backend_id
                     return worker, False
-            worker = Worker(url, name=name, token=token, max_gib=max_gib, host_gib=host_gib, shared=shared)
+            worker = Worker(url, name=name, token=token, max_gib=max_gib, host_gib=host_gib, shared=shared,
+                            backend_id=backend_id)
             info = worker.capabilities()
             if info.get("protocol") != PROTOCOL:
                 raise ValueError(f"{url} is not a Boundary Lab server ({info.get('error', 'no protocol field')})")
-            worker.backend_id = next(iter(info.get("backend_ids") or []), None)  # CPU or GPU decides its memory factor
+            if worker.backend_id is None:
+                worker.backend_id = guess_backend(info)
             self.workers.append(worker)
         LOGGER.info("worker joined: %-12s %s  state=%s  backends=%s", worker.name, url, info.get("state"), info.get("backend_ids"))
         self._start_loop(worker)
@@ -780,7 +784,8 @@ def create_http_server(farm, *, host="0.0.0.0", port=8766, token=None):
                     worker, added = farm.add_worker(str(body["url"]), name=body.get("name") or None, token=farm.worker_token,
                                                     max_gib=body.get("max_gib", farm.discovered_max_gib),
                                                     host_gib=body.get("host_gib"),
-                                                    shared=body.get("memory", "shared") != "independent", stated=True)
+                                                    shared=body.get("memory", "shared") != "independent",
+                                                    backend_id=normalize_backend(body.get("backend")), stated=True)
                     self.reply(200, {"registered": True, "added": added, "name": worker.name, "url": worker.url})
                 elif self.command == "GET" and path.path in {"/", "/dashboard"}:
                     data = (Path(__file__).with_name("dashboard.html")).read_bytes()
@@ -848,6 +853,25 @@ def local_ip():
         return None
 
 
+def normalize_backend(text):
+    """'cpu' / 'metal' / 'beat_metal' -> 'beat_metal'; 'auto', '' and None -> None (unknown)."""
+    text = (text or "").strip().lower()
+    if not text or text == "auto":
+        return None
+    return text if text.startswith("beat_") else f"beat_{text}"
+
+
+def guess_backend(info):
+    """Which backend a server probably runs, from its capabilities. They list every backend it *could* run,
+    not the one it was started with, so prefer a GPU: counting a GPU worker as CPU would double its jobs
+    and keep big meshes off it. The worker's first accepted batch replaces the guess with the truth."""
+    ids = list(info.get("backend_ids") or [])
+    for preferred in ("beat_metal", "beat_cuda", "beat_rocm"):
+        if preferred in ids:
+            return preferred
+    return ids[0] if ids else None
+
+
 def raise_descriptor_limit(wanted=4096):
     """Lift this process's soft open-file limit (macOS ships 256); the farm holds a socket per worker poll,
     per client connection and per discovery probe. Best effort; returns the limit in force."""
@@ -863,21 +887,24 @@ def raise_descriptor_limit(wanted=4096):
 
 
 def parse_worker(spec, token):
-    """URL[=name][@max_gib[/host_gib]], e.g. http://192.168.1.86:8765=mbp@48 or http://127.0.0.1:8771=air-metal@12/14
-    (this worker takes jobs up to 12 GiB; all workers on that machine together stay within 14 GiB).
-    Without ``/host_gib`` the worker is independent: only its own cap limits it."""
+    """URL[=name][@max_gib[/host_gib]][+backend], e.g. http://192.168.1.86:8765=mbp@48 or
+    http://127.0.0.1:8772=air-cpu@18/18+cpu (jobs up to 18 GiB; all workers on that machine together stay within
+    18 GiB; it runs the CPU backend, so its jobs count double). Without ``/host_gib`` the worker is independent:
+    only its own cap limits it. Without ``+backend`` the farm guesses (GPU first) until the first batch tells."""
+    spec, _, backend = spec.partition("+")
     url, _, rest = spec.partition("=")
     name, _, cap = rest.partition("@")
     if "@" in url:
         url, _, cap = url.partition("@")
     cap, _, host_cap = cap.partition("/")
     return Worker(url, name=name or None, token=token, max_gib=float(cap) if cap else None,
-                  host_gib=float(host_cap) if host_cap else None, shared=bool(host_cap))
+                  host_gib=float(host_cap) if host_cap else None, shared=bool(host_cap),
+                  backend_id=normalize_backend(backend))
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--worker", action="append", default=[], metavar="URL[=name][@max_gib[/host_gib]]",
+    parser.add_argument("--worker", action="append", default=[], metavar="URL[=name][@max_gib[/host_gib]][+backend]",
                         help="a Boundary Lab server (repeat); e.g. http://192.168.1.20:8765=mbp@48 (cap in GiB of dense BEM)")
     parser.add_argument("--discovered-max-gib", type=float, default=None,
                         help="memory cap applied to workers found by discovery or registration")

@@ -110,7 +110,8 @@ def run_worker(args):
         cmd = ["caffeinate", "-is"] + cmd
     print(f"worker ready: {url}  name={name}  backend={args.backend}  max_gib={max_gib}  machine={host_gib} ({memory})", flush=True)
     if args.farm:
-        body = {"url": url, "name": name, "max_gib": max_gib, "host_gib": host_gib, "memory": memory}
+        body = {"url": url, "name": name, "max_gib": max_gib, "host_gib": host_gib, "memory": memory,
+                "backend": None if args.backend == "auto" else args.backend}
         threading.Thread(target=register_loop, args=(args.farm, body), daemon=True).start()
     else:
         print("no --farm given: the coordinator will still find this worker by LAN scan on its port", flush=True)

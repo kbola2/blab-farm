@@ -84,7 +84,7 @@ GUI / blab CLI --(blab-remote v2)--> blab-farm serve --(blab-remote v2)--> blab 
 
 | Option | Meaning |
 |---|---|
-| `serve --worker URL[=name][@max_gib[/host_gib]]` | pin a worker instead of discovery; `@12/14`: jobs up to 12 GiB, and all workers on that machine together stay within 14 GiB; `@12` alone: independent |
+| `serve --worker URL[=name][@max_gib[/host_gib]][+backend]` | pin a worker instead of discovery; `@12/14`: jobs up to 12 GiB, and all workers on that machine together stay within 14 GiB; `@12` alone: independent; `+cpu` or `+metal`: which backend the server runs (its jobs count double on CPU) |
 | `serve --discovered-max-gib N` | cap for workers that join without stating their own |
 | `worker --host-gib N` | memory budget of the whole machine (default 80 % of RAM; 90 % with `--dedicated`) |
 | `worker --dedicated` | this machine does nothing else (no desktop, no GUI): budget 90 % of RAM |

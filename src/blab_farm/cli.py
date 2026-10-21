@@ -83,7 +83,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("serve", help="run the coordinator: one Boundary Lab Server address backed by many workers")
-    p.add_argument("--worker", action="append", default=[], metavar="URL[=name][@max_gib[/host_gib]]",
+    p.add_argument("--worker", action="append", default=[], metavar="URL[=name][@max_gib[/host_gib]][+backend]",
                    help="a Boundary Lab server to use (repeat); workers can also join by themselves")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8766)
