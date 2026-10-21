@@ -340,6 +340,25 @@ def test_independent_workers_ignore_the_machine_budget(farm):
     assert blab_farm.parse_worker("http://h:1=x@12/14", None).shared is True
 
 
+def test_discovery_probes_a_few_hosts_at_a_time(farm, monkeypatch):
+    url, live = farm([FakeWorker("w")])
+    peak, live_count, lock = [0], [0], threading.Lock()
+
+    def fake_connect(address, timeout=None):
+        with lock:
+            live_count[0] += 1
+            peak[0] = max(peak[0], live_count[0])
+        time.sleep(0.01)
+        with lock:
+            live_count[0] -= 1
+        raise OSError("nothing there")
+
+    monkeypatch.setattr(blab_farm.socket, "create_connection", fake_connect)
+    assert live.discover([f"10.0.0.{i}" for i in range(1, 255)], (8765,), timeout=0.05) == []
+    assert 0 < peak[0] <= blab_farm.Farm.DISCOVERY_CONCURRENCY, f"{peak[0]} probes were open at once"
+    assert blab_farm.raise_descriptor_limit(512) is None or blab_farm.raise_descriptor_limit(512) >= 512
+
+
 def test_registration_updates_caps_discovery_guessed(farm):
     w = FakeWorker("guess")
     url, live = farm([w])

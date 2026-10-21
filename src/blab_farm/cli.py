@@ -11,7 +11,7 @@ import time
 from urllib.request import urlopen
 
 from . import __version__
-from .farm import Farm, Worker, create_http_server, local_ip, parse_worker
+from .farm import Farm, Worker, create_http_server, local_ip, parse_worker, raise_descriptor_limit
 from .worker import install_service, run_worker, uninstall_service
 
 LOGGER = logging.getLogger("blab_farm")
@@ -19,6 +19,9 @@ LOGGER = logging.getLogger("blab_farm")
 
 def cmd_serve(args):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+    limit = raise_descriptor_limit()
+    if limit is not None and limit < 1024:
+        LOGGER.warning("open-file limit is only %d; raise it (ulimit -n 4096) or discovery and polling may fail", limit)
     worker_token = os.environ.get(args.worker_token_env) or None
     workers = [parse_worker(spec, worker_token) for spec in args.worker]
     farm = Farm(workers, args.root, batch_size=args.batch, ordered=args.ordered)

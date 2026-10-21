@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1 (2026-10-21)
+
+- Fix: LAN discovery opened one socket per host at once (253 on a /24), which on macOS's default limit of
+  256 open files took down worker polling and job journals with "Too many open files". Probes now run 24
+  at a time, the coordinator raises its own open-file limit at startup (to 4096 where allowed) and warns if
+  it stays low, and error responses from workers are closed promptly.
+
 ## 0.1.0 (2026-10-21)
 
 - First extraction from a horn-design workflow: coordinator (`serve`), worker wrapper (`worker`) with

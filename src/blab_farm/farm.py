@@ -101,6 +101,8 @@ class Worker:
                 detail = json.loads(exc.read()).get("error", "")
             except (ValueError, AttributeError):
                 detail = ""
+            finally:
+                exc.close()  # release the socket now rather than when the garbage collector gets to it
             raise WorkerError(exc.code, detail or exc.reason) from exc
         except (URLError, OSError, ValueError) as exc:
             raise WorkerError(0, str(exc)) from exc
@@ -385,17 +387,20 @@ class Farm:
         self._start_loop(worker)
         return worker, True
 
+    DISCOVERY_CONCURRENCY = 24  # a /24 scan must not open 250 sockets at once (macOS defaults to 256 descriptors)
+
     def discover(self, hosts, ports=(8765,), *, timeout=0.4):
-        """Probe host:port pairs for Boundary Lab servers and add the ones found."""
+        """Probe host:port pairs for Boundary Lab servers and add the ones found, a few at a time."""
         known = {w.url for w in self.workers}
         found = []
+        slots = threading.BoundedSemaphore(self.DISCOVERY_CONCURRENCY)
 
         def probe(host, port):
             url = f"http://{host}:{port}"
             if url in known:
                 return
             try:
-                with socket.create_connection((host, port), timeout=timeout):
+                with slots, socket.create_connection((host, port), timeout=timeout):
                     pass
             except OSError:
                 return
@@ -415,8 +420,9 @@ class Farm:
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join(timeout=timeout + 6)
+            thread.join(timeout=timeout * (len(threads) / self.DISCOVERY_CONCURRENCY + 2) + 6)
         return found
+
 
     def start_discovery(self, interval_s=30.0, ports=(8765,)):
         """Scan this Mac's /24 LAN for Boundary Lab servers every ``interval_s`` seconds."""
@@ -839,6 +845,20 @@ def local_ip():
             probe.connect(("192.0.2.1", 9))
             return probe.getsockname()[0]
     except OSError:
+        return None
+
+
+def raise_descriptor_limit(wanted=4096):
+    """Lift this process's soft open-file limit (macOS ships 256); the farm holds a socket per worker poll,
+    per client connection and per discovery probe. Best effort; returns the limit in force."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = min(wanted, hard) if hard != resource.RLIM_INFINITY else wanted
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+        return resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    except (ImportError, ValueError, OSError):
         return None
 
 
