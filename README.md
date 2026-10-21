@@ -49,6 +49,18 @@ per-frequency state (`queued`, `assigned`, `running`, `done`) and the machine th
 A worker is healthy when `curl http://<worker>:8765/v1/capabilities` reports `"state": "ready"`.
 See [AGENTS.md](AGENTS.md) for the conventions a session should follow when changing this package.
 
+## Does Boundary Lab change? No.
+
+Nothing is recompiled, patched or reinstalled. The farm is a separate Python process that speaks the
+network protocol Boundary Lab already uses for its own *Boundary Lab Server* mode, and every worker runs
+Boundary Lab's own `blab server`. A user keeps their existing Boundary Lab install on each worker
+(source checkout or packaged installer, with its solver engine prepared as for any server), installs
+this package, and starts one process per machine. Removing the farm is `pip uninstall` and switching
+the GUI's solver back to local.
+
+For a complete, checked, step-by-step procedure (for agents or careful humans) see
+[docs/AGENT_SETUP.md](docs/AGENT_SETUP.md).
+
 ## How it works
 
 ```
